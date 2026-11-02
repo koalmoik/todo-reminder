@@ -1,7 +1,7 @@
 {
   "uuid": "todo-counter@peter",
-  "name": "To Do Zähler",
-  "description": "Zeigt offene Microsoft-To-Do-Aufgaben in der oberen Leiste.",
+  "name": "To Do Counter",
+  "description": "Shows open Microsoft To Do tasks in the top bar.",
   "shell-version": ["50"],
   "version": 1
 }

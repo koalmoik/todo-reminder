@@ -1,4 +1,4 @@
-"""GTK-4/libadwaita-Fenster zum Anzeigen und Bearbeiten der Microsoft-To-Do-Aufgaben."""
+"""GTK 4/libadwaita window for viewing and editing Microsoft To Do tasks."""
 import threading
 from datetime import date, datetime, timedelta
 
@@ -10,10 +10,11 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 import todo  # noqa: E402
+from i18n import WEEKDAYS, _  # noqa: E402
 
 APP_ID = "io.github.peter.TodoReminder"
 ALL = "__all__"
-OFFLINE = "Keine Internetverbindung"
+OFFLINE = _("No internet connection")
 RANK = {"overdue": 0, "today": 1, "soon": 2, "later": 3, "none": 4}
 
 CSS = "".join(
@@ -33,11 +34,11 @@ def dot(css):
 
 
 def ask_name(parent, heading, initial, confirm, callback):
-    """Kleiner Dialog mit Textfeld; ruft callback(name) bei Bestätigung auf."""
+    """Small dialog with a text field; calls callback(name) on confirm."""
     entry = Gtk.Entry(text=initial, activates_default=True)
     dialog = Adw.AlertDialog(heading=heading, extra_child=entry,
                              default_response="ok", close_response="cancel")
-    dialog.add_response("cancel", "Abbrechen")
+    dialog.add_response("cancel", _("Cancel"))
     dialog.add_response("ok", confirm)
     dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
 
@@ -64,15 +65,15 @@ class Window(Adw.ApplicationWindow):
             self.add_action(action)
 
         header = Adw.HeaderBar()
-        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text="Neue Aufgabe")
+        add = Gtk.Button(icon_name="list-add-symbolic", tooltip_text=_("New task"))
         add.connect("clicked", lambda *_: self.edit(None))
         header.pack_start(add)
         menu = Gio.Menu()
-        menu.append("Liste umbenennen…", "win.rename-list")
-        menu.append("Liste löschen…", "win.delete-list")
+        menu.append(_("Rename list…"), "win.rename-list")
+        menu.append(_("Delete list…"), "win.delete-list")
         header.pack_end(Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=menu,
-                                       tooltip_text="Liste"))
-        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text="Synchronisieren")
+                                       tooltip_text=_("List")))
+        refresh = Gtk.Button(icon_name="view-refresh-symbolic", tooltip_text=_("Sync"))
         refresh.connect("clicked", lambda *_: self.sync())
         header.pack_end(refresh)
         self.spinner = Adw.Spinner(visible=False)
@@ -81,7 +82,7 @@ class Window(Adw.ApplicationWindow):
         self.sidebar = Gtk.ListBox(css_classes=["navigation-sidebar"])
         self.sidebar.connect("row-selected", self.on_list_selected)
         new_list = Gtk.Button(css_classes=["flat"], margin_start=6, margin_end=6, margin_bottom=6,
-                              child=Adw.ButtonContent(icon_name="list-add-symbolic", label="Neue Liste"))
+                              child=Adw.ButtonContent(icon_name="list-add-symbolic", label=_("New list")))
         new_list.connect("clicked", self.on_new_list)
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, width_request=200)
         side.append(Gtk.ScrolledWindow(child=self.sidebar, vexpand=True))
@@ -91,7 +92,7 @@ class Window(Adw.ApplicationWindow):
                                  valign=Gtk.Align.START)
         clamp = Adw.Clamp(child=self.tasks, maximum_size=760, margin_top=18, margin_bottom=18,
                           margin_start=12, margin_end=12)
-        self.empty = Adw.StatusPage(icon_name="checkbox-checked-symbolic", title="Alles erledigt 🎉")
+        self.empty = Adw.StatusPage(icon_name="checkbox-checked-symbolic", title=_("All done 🎉"))
         self.stack = Gtk.Stack()
         self.stack.add_named(Gtk.ScrolledWindow(child=clamp, vexpand=True), "tasks")
         self.stack.add_named(self.empty, "empty")
@@ -103,7 +104,7 @@ class Window(Adw.ApplicationWindow):
         view.add_top_bar(header)
         self.set_content(view)
 
-        self._offline = False   # letzter Abruf scheiterte an fehlender Verbindung
+        self._offline = False   # last fetch failed for lack of a connection
         self._retry_id = 0
         Gio.NetworkMonitor.get_default().connect("network-changed", self.on_network_changed)
 
@@ -113,7 +114,7 @@ class Window(Adw.ApplicationWindow):
     def toast(self, text, timeout=3):
         self.toasts.add_toast(Adw.Toast(title=esc(text), timeout=timeout))
 
-    # ---------- Hintergrund-Arbeit ----------
+    # ---------- Background work ----------
 
     def run_bg(self, fn, done=None):
         self.spinner.set_visible(True)
@@ -123,10 +124,10 @@ class Window(Adw.ApplicationWindow):
                 res, err = fn(), None
             except todo.AuthError as e:
                 res, err = None, str(e)
-            except requests.ConnectionError:  # kein Netz, DNS geht nicht, Server nicht erreichbar
+            except requests.ConnectionError:  # no network, DNS failing, server unreachable
                 res, err = None, OFFLINE
-            except Exception as e:  # Netzwerk-/API-Fehler als Toast anzeigen
-                res, err = None, f"Fehler: {e}"
+            except Exception as e:  # show network/API errors as a toast
+                res, err = None, _("Error: {error}").format(error=e)
             GLib.idle_add(self._bg_done, res, err, done)
 
         threading.Thread(target=work, daemon=True).start()
@@ -134,7 +135,7 @@ class Window(Adw.ApplicationWindow):
     def _bg_done(self, res, err, done):
         self.spinner.set_visible(False)
         if err == OFFLINE:
-            if not self._offline:   # Meldung nur einmal zeigen, nicht bei jedem Wiederholversuch
+            if not self._offline:   # show the message once, not on every retry
                 self.toast(err, 8)
             self._offline = True
             self.schedule_retry(30)
@@ -146,11 +147,11 @@ class Window(Adw.ApplicationWindow):
                 done(res)
         return False
 
-    # ---------- Automatisch neu laden, sobald das Netz da ist ----------
+    # ---------- Reload automatically once the network is back ----------
 
     def on_network_changed(self, monitor, available):
         if available and self._offline:
-            self.schedule_retry(3)   # kurz warten, bis DNS bereit ist
+            self.schedule_retry(3)   # give DNS a moment to come up
 
     def schedule_retry(self, seconds):
         if self._retry_id:
@@ -168,7 +169,7 @@ class Window(Adw.ApplicationWindow):
         self.run_bg(todo.fetch, self.set_data)
 
     def change(self, action, message=None):
-        """API-Änderung ausführen, danach neu laden."""
+        """Run an API change, then reload."""
         def fn():
             action()
             return todo.fetch()
@@ -189,7 +190,7 @@ class Window(Adw.ApplicationWindow):
     def current_list(self):
         return next((l for l in self.data["lists"] if l["id"] == self.current), None)
 
-    # ---------- Darstellung ----------
+    # ---------- Rendering ----------
 
     def visible_tasks(self):
         tasks = [t for t in self.data["tasks"] if self.current in (ALL, t["list_id"])]
@@ -202,7 +203,7 @@ class Window(Adw.ApplicationWindow):
         counts = {}
         for t in self.data["tasks"]:
             counts[t["list_id"]] = counts.get(t["list_id"], 0) + 1
-        entries = [(ALL, "Alle offenen", "st-today", len(self.data["tasks"]))]
+        entries = [(ALL, _("All open"), "st-today", len(self.data["tasks"]))]
         entries += [(l["id"], l["name"] + (" 👥" if l.get("shared") else ""),
                      f"lc-{l['color']}", counts.get(l["id"], 0)) for l in self.data["lists"]]
         for list_id, name, css, count in entries:
@@ -243,7 +244,7 @@ class Window(Adw.ApplicationWindow):
             parts.append(esc(t["list"]))
         row = Adw.ActionRow(title=esc(t["title"]), subtitle=" · ".join(parts), activatable=True)
 
-        check = Gtk.CheckButton(valign=Gtk.Align.CENTER, tooltip_text="Erledigt")
+        check = Gtk.CheckButton(valign=Gtk.Align.CENTER, tooltip_text=_("Done"))
         check.connect("toggled", self.on_done, t)
         row.add_prefix(Gtk.Box(css_classes=["task-bar", f"st-{status}"]))
         row.add_prefix(check)
@@ -266,45 +267,46 @@ class Window(Adw.ApplicationWindow):
             return
         self.data["tasks"] = [x for x in self.data["tasks"] if x["id"] != t["id"]]
         self.render()
-        self.change(lambda: todo.complete_task(t["list_id"], t["id"]), f"„{t['title']}“ erledigt ✓")
+        self.change(lambda: todo.complete_task(t["list_id"], t["id"]), _("“{title}” done ✓").format(title=t["title"]))
 
-    # ---------- Listen ----------
+    # ---------- Lists ----------
 
     def on_new_list(self, *_):
-        ask_name(self, "Neue Liste", "", "Anlegen",
-                 lambda name: self.change(lambda: todo.create_list(name), f"Liste „{name}“ angelegt"))
+        ask_name(self, _("New list"), "", _("Create"),
+                 lambda name: self.change(lambda: todo.create_list(name),
+                                          _("List “{name}” created").format(name=name)))
 
     def on_rename_list(self, *_):
         lst = self.current_list()
-        ask_name(self, "Liste umbenennen", lst["name"], "Umbenennen",
-                 lambda name: self.change(lambda: todo.rename_list(lst["id"], name), "Umbenannt ✓"))
+        ask_name(self, _("Rename list"), lst["name"], _("Rename"),
+                 lambda name: self.change(lambda: todo.rename_list(lst["id"], name), _("Renamed ✓")))
 
     def on_delete_list(self, *_):
         lst = self.current_list()
         count = sum(t["list_id"] == lst["id"] for t in self.data["tasks"])
         dialog = Adw.AlertDialog(
-            heading=f"„{lst['name']}“ löschen?",
-            body=f"Die Liste und ihre {count} offenen Aufgaben werden überall gelöscht, "
-                 "auch auf dem Handy.",
+            heading=_("Delete “{name}”?").format(name=lst["name"]),
+            body=_("The list and its {count} open tasks will be deleted everywhere, "
+                   "including on your phone.").format(count=count),
             close_response="cancel")
-        dialog.add_response("cancel", "Abbrechen")
-        dialog.add_response("delete", "Löschen")
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("delete", _("Delete"))
         dialog.set_response_appearance("delete", Adw.ResponseAppearance.DESTRUCTIVE)
         dialog.connect("response", lambda _d, r: r == "delete" and self.change(
-            lambda: todo.delete_list(lst["id"]), f"Liste „{lst['name']}“ gelöscht"))
+            lambda: todo.delete_list(lst["id"]), _("List “{name}” deleted").format(name=lst["name"])))
         dialog.present(self)
 
-    # ---------- Bearbeiten ----------
+    # ---------- Editing ----------
 
     def edit(self, t):
         if not self.data["lists"]:
-            self.toast("Noch keine Listen geladen – erst synchronisieren.")
+            self.toast(_("No lists loaded yet – sync first."))
             return
         EditDialog(self, t).present(self)
 
 
 class DatePicker(Gtk.MenuButton):
-    """Knopf mit Datumsanzeige; Popover mit Schnellwahl und Kalender."""
+    """Button showing a date; popover with quick picks and a calendar."""
 
     def __init__(self, value=None, allow_none=True):
         super().__init__(valign=Gtk.Align.CENTER, always_show_arrow=True)
@@ -313,7 +315,7 @@ class DatePicker(Gtk.MenuButton):
         self._syncing = False
 
         quick = Gtk.Box(spacing=6, homogeneous=True)
-        for label, days in (("Heute", 0), ("Morgen", 1), ("Nächste Woche", 7)):
+        for label, days in ((_("Today"), 0), (_("Tomorrow"), 1), (_("Next week"), 7)):
             btn = Gtk.Button(label=label)
             btn.connect("clicked", lambda _b, d=days: self.set_value(date.today() + timedelta(days=d)))
             quick.append(btn)
@@ -323,7 +325,7 @@ class DatePicker(Gtk.MenuButton):
         box.append(quick)
         box.append(self.cal)
         if allow_none:
-            clear = Gtk.Button(label="Kein Datum", css_classes=["flat"])
+            clear = Gtk.Button(label=_("No date"), css_classes=["flat"])
             clear.connect("clicked", lambda *_: self.set_value(None))
             box.append(clear)
         popover = Gtk.Popover(child=box)
@@ -348,7 +350,7 @@ class DatePicker(Gtk.MenuButton):
         self.get_popover().popdown()
 
     def _update(self):
-        self.set_label(todo.date_label(self.value) if self.value else "Kein Datum")
+        self.set_label(todo.date_label(self.value) if self.value else _("No date"))
 
 
 def spin(upper, step):
@@ -369,39 +371,39 @@ def spin(upper, step):
 
 class EditDialog(Adw.Dialog):
     def __init__(self, win, t):
-        super().__init__(title="Aufgabe bearbeiten" if t else "Neue Aufgabe", content_width=480)
+        super().__init__(title=_("Edit task") if t else _("New task"), content_width=480)
         self.win, self.t = win, t
         lists = win.data["lists"]
 
-        cancel = Gtk.Button(label="Abbrechen")
+        cancel = Gtk.Button(label=_("Cancel"))
         cancel.connect("clicked", lambda *_: self.close())
-        save = Gtk.Button(label="Speichern", css_classes=["suggested-action"])
+        save = Gtk.Button(label=_("Save"), css_classes=["suggested-action"])
         save.connect("clicked", self.on_save)
         header = Adw.HeaderBar(show_end_title_buttons=False, show_start_title_buttons=False)
         header.pack_start(cancel)
         header.pack_end(save)
 
-        self.title = Adw.EntryRow(title="Titel", text=t["title"] if t else "")
+        self.title = Adw.EntryRow(title=_("Title"), text=t["title"] if t else "")
         self.title.connect("entry-activated", self.on_save)
         self.list_ids = [l["id"] for l in lists]
-        self.list_row = Adw.ComboRow(title="Liste", sensitive=t is None,
+        self.list_row = Adw.ComboRow(title=_("List"), sensitive=t is None,
                                      model=Gtk.StringList.new([l["name"] for l in lists]))
         default = t["list_id"] if t else win.current
         if default in self.list_ids:
             self.list_row.set_selected(self.list_ids.index(default))
 
-        # Fälligkeit
+        # Due date
         self.due = DatePicker(date.fromisoformat(t["due"]) if t and t["due"] else None)
-        due_row = Adw.ActionRow(title="Fällig")
+        due_row = Adw.ActionRow(title=_("Due"))
         due_row.add_suffix(self.due)
 
-        # Erinnerung: Schalter + Datum + Uhrzeit
+        # Reminder: switch + date + time
         rem = datetime.fromisoformat(t["reminder"]) if t and t["reminder"] else None
-        self.rem = Adw.ExpanderRow(title="Erinnerung 🔔", show_enable_switch=True,
+        self.rem = Adw.ExpanderRow(title=_("Reminder 🔔"), show_enable_switch=True,
                                    enable_expansion=rem is not None, expanded=rem is not None)
         self.rem.connect("notify::enable-expansion", self.on_reminder_toggled)
         self.rem_date = DatePicker(rem.date() if rem else None, allow_none=False)
-        date_row = Adw.ActionRow(title="Tag")
+        date_row = Adw.ActionRow(title=_("Day"))
         date_row.add_suffix(self.rem_date)
         self.hour, self.minute = spin(23, 1), spin(59, 5)
         if rem:
@@ -411,14 +413,14 @@ class EditDialog(Adw.Dialog):
         time_box.append(self.hour)
         time_box.append(Gtk.Label(label=":", css_classes=["title-3"]))
         time_box.append(self.minute)
-        time_row = Adw.ActionRow(title="Uhrzeit")
+        time_row = Adw.ActionRow(title=_("Time"))
         time_row.add_suffix(time_box)
         self.rem.add_row(date_row)
         self.rem.add_row(time_row)
 
-        # Wiederholung: Art, Intervall ("alle 2 Wochen"), Wochentage
+        # Recurrence: kind, interval ("every 2 weeks"), weekdays
         rec = t.get("recurrence") if t else None
-        self.repeat = Adw.ComboRow(title="Wiederholen 🔁", model=Gtk.StringList.new(todo.REPEAT_LABELS))
+        self.repeat = Adw.ComboRow(title=_("Repeat 🔁"), model=Gtk.StringList.new(todo.REPEAT_LABELS))
         self.repeat.set_selected(todo.REPEAT_KINDS.index(rec["kind"]) if rec else 0)
         self.interval = Gtk.SpinButton.new_with_range(1, 99, 1)
         self.interval.set_numeric(True)
@@ -428,21 +430,21 @@ class EditDialog(Adw.Dialog):
         interval_box = Gtk.Box(spacing=8)
         interval_box.append(self.interval)
         interval_box.append(self.unit)
-        self.interval_row = Adw.ActionRow(title="Alle")
+        self.interval_row = Adw.ActionRow(title=_("Every"))
         self.interval_row.add_suffix(interval_box)
         self.day_buttons = [Gtk.ToggleButton(label=name, active=bool(rec and i in rec["days"]))
-                            for i, name in enumerate(todo.WEEKDAYS)]
+                            for i, name in enumerate(WEEKDAYS)]
         days_box = Gtk.Box(css_classes=["linked"], valign=Gtk.Align.CENTER)
         for btn in self.day_buttons:
             days_box.append(btn)
-        self.days_row = Adw.ActionRow(title="An")
+        self.days_row = Adw.ActionRow(title=_("On"))
         self.days_row.add_suffix(days_box)
         self.repeat.connect("notify::selected", self.on_repeat_changed)
         self.interval.connect("value-changed", self.on_repeat_changed)
         self._initial = (self.repeat_state(), self.due.value)
         self.on_repeat_changed()
 
-        self.important = Adw.SwitchRow(title="Wichtig ⭐", active=bool(t and t["importance"] == "high"))
+        self.important = Adw.SwitchRow(title=_("Important ⭐"), active=bool(t and t["importance"] == "high"))
 
         group = Adw.PreferencesGroup()
         for row in (self.title, self.list_row, due_row, self.repeat, self.interval_row,
@@ -452,14 +454,14 @@ class EditDialog(Adw.Dialog):
         self.notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, top_margin=8, bottom_margin=8,
                                   left_margin=8, right_margin=8, css_classes=["card"])
         self.notes.get_buffer().set_text(t["notes"] if t else "")
-        notes_group = Adw.PreferencesGroup(title="Notizen")
+        notes_group = Adw.PreferencesGroup(title=_("Notes"))
         notes_group.add(Gtk.ScrolledWindow(child=self.notes, min_content_height=90))
 
         page = Adw.PreferencesPage()
         page.add(group)
         page.add(notes_group)
         if t:
-            delete = Gtk.Button(label="Aufgabe löschen", css_classes=["destructive-action", "pill"],
+            delete = Gtk.Button(label=_("Delete task"), css_classes=["destructive-action", "pill"],
                                 halign=Gtk.Align.CENTER)
             delete.connect("clicked", self.on_delete)
             del_group = Adw.PreferencesGroup()
@@ -489,7 +491,7 @@ class EditDialog(Adw.Dialog):
             self.day_buttons[(self.due.value or date.today()).weekday()].set_active(True)
 
     def on_reminder_toggled(self, row, _pspec):
-        """Beim Einschalten sinnvolle Vorgaben: Fälligkeitstag bzw. heute, nächste volle Stunde."""
+        """When switched on, use sensible defaults: the due date (or today) and the next full hour."""
         if not row.get_enable_expansion() or self.rem_date.value:
             return
         day = self.due.value or date.today()
@@ -508,13 +510,13 @@ class EditDialog(Adw.Dialog):
     def on_save(self, *_):
         title = self.title.get_text().strip()
         if not title:
-            self.banner.set_title("Bitte einen Titel eingeben.")
+            self.banner.set_title(_("Please enter a title."))
             self.banner.set_revealed(True)
             return
         due, rem = self.due.value, self.reminder()
         kind, interval, days = self.repeat_state()
         if kind != "none" and not due:
-            due = date.today()  # Wiederholungen brauchen bei Microsoft ein Fälligkeitsdatum
+            due = date.today()  # Microsoft requires a due date for recurring tasks
 
         buf = self.notes.get_buffer()
         notes = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
@@ -534,18 +536,18 @@ class EditDialog(Adw.Dialog):
         else:
             list_id = self.list_ids[self.list_row.get_selected()]
             action = lambda: todo.create_task(list_id, fields)  # noqa: E731
-        self.win.change(action, "Gespeichert ✓")
+        self.win.change(action, _("Saved ✓"))
         self.close()
 
     def on_delete(self, *_):
         t = self.t
-        self.win.change(lambda: todo.delete_task(t["list_id"], t["id"]), f"„{t['title']}“ gelöscht")
+        self.win.change(lambda: todo.delete_task(t["list_id"], t["id"]), _("“{title}” deleted").format(title=t["title"]))
         self.close()
 
 
 def main(startup=False, new=False):
     if startup and not todo.load_json(todo.CACHE_FILE, {}).get("tasks", True):
-        return  # beim Anmelden nichts anzeigen, wenn keine Aufgaben offen sind
+        return  # at login, show nothing if there are no open tasks
 
     app = Adw.Application(application_id=APP_ID)
 
@@ -564,7 +566,7 @@ def main(startup=False, new=False):
     app.connect("startup", on_startup)
     app.connect("activate", lambda app: window().present())
 
-    # Läuft das Fenster schon, wird die laufende Instanz angesprochen (holt es nach vorne).
+    # If the window is already running, talk to that instance (brings it to the front).
     app.register(None)
     if app.get_is_remote():
         app.activate_action("new-task", None) if new else app.activate()

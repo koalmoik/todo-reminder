@@ -10,6 +10,7 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const CACHE_DIR = GLib.build_filenamev([GLib.get_user_cache_dir(), 'todo-reminder']);
+const CONFIG_FILE = GLib.build_filenamev([GLib.get_user_config_dir(), 'todo-reminder', 'config.json']);
 const CACHE_FILE = GLib.build_filenamev([CACHE_DIR, 'tasks.json']);
 const SCRIPT = GLib.build_filenamev([GLib.get_home_dir(), 'Programs', 'todo-reminder', 'todo.py']);
 const MAX_ITEMS = 15;
@@ -37,50 +38,93 @@ function statusOf(due) {
     return due <= isoDay(2) ? 'soon' : 'later';
 }
 
-const WEEKDAYS = ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'];
-const MONTHS = ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August',
-    'September', 'Oktober', 'November', 'Dezember'];
+// UI language: "language" in ~/.config/todo-reminder/config.json, otherwise the system locale
+function detectLanguage() {
+    try {
+        const [, bytes] = GLib.file_get_contents(CONFIG_FILE);
+        const lang = JSON.parse(new TextDecoder().decode(bytes)).language;
+        if (lang === 'en' || lang === 'de')
+            return lang;
+    } catch {}
+    return GLib.get_language_names()[0].toLowerCase().startsWith('de') ? 'de' : 'en';
+}
 
-// Immer gleiches Format: "Fr 06.11."
+const LANG = detectLanguage();
+
+const DE = {
+    'overdue': 'überfällig',
+    'today': 'heute',
+    'tomorrow': 'morgen',
+    'Overdue': 'Überfällig',
+    'Today': 'Heute',
+    'Tomorrow': 'Morgen',
+    'No date': 'Ohne Datum',
+    'Next 7 days': 'Nächste 7 Tage',
+    'No data yet – please sign in': 'Noch keine Daten – bitte anmelden',
+    'All done 🎉': 'Alles erledigt 🎉',
+    '… and {n} more': '… und {n} weitere',
+    'New task…': 'Neue Aufgabe…',
+    'Open all tasks': 'Alle Aufgaben öffnen',
+    'Sync now': 'Jetzt synchronisieren',
+};
+
+function _(text) {
+    return LANG === 'de' ? DE[text] ?? text : text;
+}
+
+const WEEKDAYS = {
+    en: ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'],
+    de: ['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'],
+}[LANG];
+const MONTHS = {
+    en: ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August',
+        'September', 'October', 'November', 'December'],
+    de: ['Januar', 'Februar', 'März', 'April', 'Mai', 'Juni', 'Juli', 'August',
+        'September', 'Oktober', 'November', 'Dezember'],
+}[LANG];
+const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Always the same format: "Fri 6 Nov" or "Fr 06.11."
 function dueText(t) {
     if (!t.due)
         return '';
     const [y, m, d] = t.due.split('-').map(Number);
+    const day = WEEKDAYS[new Date(y, m - 1, d).getDay()];
     const pad = n => String(n).padStart(2, '0');
-    return `${WEEKDAYS[new Date(y, m - 1, d).getDay()]} ${pad(d)}.${pad(m)}.`;
+    return LANG === 'de' ? `${day} ${pad(d)}.${pad(m)}.` : `${day} ${d} ${MONTHS_SHORT[m - 1]}`;
 }
 
 function tickerMarkup(t) {
-    const when = {overdue: 'überfällig', today: 'heute'}[t.status] ??
-        (t.due === isoDay(1) ? 'morgen' : dueText(t));
+    const when = {overdue: _('overdue'), today: _('today')}[t.status] ??
+        (t.due === isoDay(1) ? _('tomorrow') : dueText(t));
     return `${GLib.markup_escape_text(t.title, -1)}  <span foreground="${COLORS[t.status]}" ` +
         `weight="bold">· ${when}</span>`;
 }
 
-// Überschrift, unter der eine Aufgabe im Menü steht
+// Heading a task is listed under in the menu
 function sectionOf(t) {
     if (t.status === 'overdue')
-        return 'Überfällig';
+        return _('Overdue');
     if (t.status === 'today')
-        return 'Heute';
+        return _('Today');
     if (!t.due)
-        return 'Ohne Datum';
+        return _('No date');
     if (t.due === isoDay(1))
-        return 'Morgen';
+        return _('Tomorrow');
     if (t.due <= isoDay(7))
-        return 'Nächste 7 Tage';
+        return _('Next 7 days');
     const [y, m] = t.due.split('-').map(Number);
     return MONTHS[m - 1] + (y !== new Date().getFullYear() ? ` ${y}` : '');
 }
 
-// Spalte mit fester Breite, damit Sterne und Daten untereinander stehen
+// Fixed-width column so stars and dates line up
 function column(child, width) {
     return new St.Bin({child, style: `width: ${width};`, y_align: Clutter.ActorAlign.CENTER});
 }
 
 function run(args) {
     try {
-        // Über einen Launch-Context starten, damit GNOME das Fenster nach vorne holen darf
+        // Launch via a launch context so GNOME may bring the window to the front
         const info = Gio.AppInfo.create_from_commandline(
             ['/usr/bin/python3', SCRIPT, ...args].map(a => GLib.shell_quote(a)).join(' '),
             'To Do', Gio.AppInfoCreateFlags.SUPPORTS_STARTUP_NOTIFICATION);
@@ -119,7 +163,7 @@ class TodoIndicator extends PanelMenu.Button {
             if ([file, other].some(f => f?.get_basename() === 'tasks.json'))
                 this._reload();
         });
-        // Alle 5 Minuten neu einfärben (z.B. wenn um Mitternacht "morgen" zu "heute" wird)
+        // Recolour every 5 minutes (e.g. when "tomorrow" becomes "today" at midnight)
         this._timer = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT, 300, () => {
             this._reload();
             return GLib.SOURCE_CONTINUE;
@@ -177,9 +221,9 @@ class TodoIndicator extends PanelMenu.Button {
     _buildMenu(tasks) {
         this.menu.removeAll();
         if (!tasks) {
-            this.menu.addMenuItem(new PopupMenu.PopupMenuItem('Noch keine Daten – bitte anmelden', {reactive: false}));
+            this.menu.addMenuItem(new PopupMenu.PopupMenuItem(_('No data yet – please sign in'), {reactive: false}));
         } else if (!tasks.length) {
-            this.menu.addMenuItem(new PopupMenu.PopupMenuItem('Alles erledigt 🎉', {reactive: false}));
+            this.menu.addMenuItem(new PopupMenu.PopupMenuItem(_('All done 🎉'), {reactive: false}));
         }
         let section = null;
         for (const t of (tasks ?? []).slice(0, MAX_ITEMS)) {
@@ -206,12 +250,12 @@ class TodoIndicator extends PanelMenu.Button {
         }
         if (tasks && tasks.length > MAX_ITEMS) {
             this.menu.addMenuItem(new PopupMenu.PopupMenuItem(
-                `… und ${tasks.length - MAX_ITEMS} weitere`, {reactive: false}));
+                _('… and {n} more').replace('{n}', tasks.length - MAX_ITEMS), {reactive: false}));
         }
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        this.menu.addAction('Neue Aufgabe…', () => run(['app', '--new']), 'list-add-symbolic');
-        this.menu.addAction('Alle Aufgaben öffnen', () => run(['app']), 'view-list-symbolic');
-        this.menu.addAction('Jetzt synchronisieren', () => run(['sync']), 'view-refresh-symbolic');
+        this.menu.addAction(_('New task…'), () => run(['app', '--new']), 'list-add-symbolic');
+        this.menu.addAction(_('Open all tasks'), () => run(['app']), 'view-list-symbolic');
+        this.menu.addAction(_('Sync now'), () => run(['sync']), 'view-refresh-symbolic');
     }
 
     destroy() {
@@ -228,7 +272,7 @@ class TodoIndicator extends PanelMenu.Button {
 export default class TodoCounterExtension extends Extension {
     enable() {
         this._indicator = new TodoIndicator();
-        // Links in der Leiste, nach dem Digest – das Laufband ändert seine Breite, daher ganz außen
+        // Left side of the panel, after the digest – the ticker changes width, so it goes last
         Main.panel.addToStatusArea(this.uuid, this._indicator, 2, 'left');
     }
 

@@ -1,11 +1,11 @@
 #!/usr/bin/python3
-"""Microsoft To Do für GNOME: Sync, Erinnerungen und Verwaltungsfenster.
+"""Microsoft To Do for GNOME: sync, reminders and a task window.
 
-Befehle:
-  todo.py login <client-id>   einmalig bei Microsoft anmelden
-  todo.py sync                Aufgaben holen, Erinnerungen senden (systemd-Timer)
-  todo.py list                offene Aufgaben im Terminal anzeigen
-  todo.py app [--startup|--new]  Fenster öffnen
+Commands:
+  todo.py login <client-id>      sign in to Microsoft once
+  todo.py sync                   fetch tasks, send reminders (systemd timer)
+  todo.py list                   show open tasks in the terminal
+  todo.py app [--startup|--new]  open the window
 """
 import json
 import re
@@ -19,10 +19,12 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from i18n import WEEKDAYS, _, format_day
+
 CONFIG_DIR = Path.home() / ".config/todo-reminder"
 CACHE_DIR = Path.home() / ".cache/todo-reminder"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-TOKEN_FILE = CONFIG_DIR / "token.json"  # alt; Token liegt jetzt im GNOME-Schlüsselbund
+TOKEN_FILE = CONFIG_DIR / "token.json"  # legacy; the token now lives in the GNOME keyring
 CACHE_FILE = CACHE_DIR / "tasks.json"
 STATE_FILE = CACHE_DIR / "notified.json"
 
@@ -40,7 +42,7 @@ class AuthError(Exception):
     pass
 
 
-# ---------- Dateien ----------
+# ---------- Files ----------
 
 def load_json(path, default):
     try:
@@ -50,7 +52,7 @@ def load_json(path, default):
 
 
 def save_json(path, data):
-    """Atomar schreiben; Ordner und Datei nur für den eigenen Benutzer lesbar."""
+    """Write atomically; folder and file readable by the current user only."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.parent.chmod(0o700)
     tmp = path.with_suffix(".tmp")
@@ -60,7 +62,7 @@ def save_json(path, data):
     tmp.replace(path)
 
 
-# ---------- GNOME-Schlüsselbund ----------
+# ---------- GNOME keyring ----------
 
 def _secret():
     import gi
@@ -76,8 +78,8 @@ def keyring_load():
     try:
         raw = Secret.password_lookup_sync(schema, {"kind": "token"}, None)
     except Exception as e:
-        raise AuthError(f"Schlüsselbund nicht erreichbar: {e}")
-    if raw is None and TOKEN_FILE.exists():  # alte Token-Datei einmalig übernehmen
+        raise AuthError(_("Keyring not available: {error}").format(error=e))
+    if raw is None and TOKEN_FILE.exists():  # migrate the old token file once
         tok = load_json(TOKEN_FILE, None)
         if tok:
             keyring_store(tok)
@@ -92,12 +94,12 @@ def keyring_store(tok):
                                "Microsoft To Do (GNOME)", json.dumps(tok), None)
 
 
-# ---------- Anmeldung (Device-Code-Flow) ----------
+# ---------- Sign-in (device code flow) ----------
 
 def client_id():
     cid = load_json(CONFIG_FILE, {}).get("client_id")
     if not cid:
-        raise AuthError("Keine Client-ID – bitte 'todo.py login <client-id>' ausführen.")
+        raise AuthError(_("No client ID – please run 'todo.py login <client-id>'."))
     return cid
 
 
@@ -107,10 +109,10 @@ def store_token(tok):
 
 
 def login(cid):
-    save_json(CONFIG_FILE, {"client_id": cid})
+    save_json(CONFIG_FILE, {**load_json(CONFIG_FILE, {}), "client_id": cid})
     r = requests.post(f"{AUTH}/devicecode", data={"client_id": cid, "scope": SCOPES}, timeout=30)
     if not r.ok:
-        sys.exit(f"Fehler: {r.json().get('error_description', r.text)}")
+        sys.exit(_("Error: {error}").format(error=r.json().get('error_description', r.text)))
     dc = r.json()
     print(dc["message"], flush=True)
     interval = dc.get("interval", 5)
@@ -121,7 +123,7 @@ def login(cid):
             "client_id": cid, "device_code": dc["device_code"]}).json()
         if "access_token" in tok:
             store_token(tok)
-            print("Angemeldet.")
+            print(_("Signed in."))
             return
         err = tok.get("error")
         if err == "authorization_pending":
@@ -129,26 +131,26 @@ def login(cid):
         if err == "slow_down":
             interval += 5
             continue
-        sys.exit(f"Anmeldung fehlgeschlagen: {tok.get('error_description', err)}")
+        sys.exit(_("Sign-in failed: {error}").format(error=tok.get('error_description', err)))
 
 
 def access_token():
     tok = keyring_load()
     if not tok:
-        raise AuthError("Nicht angemeldet – bitte 'todo.py login <client-id>' ausführen.")
+        raise AuthError(_("Not signed in – please run 'todo.py login <client-id>'."))
     if time.time() < tok["expires_at"]:
         return tok["access_token"]
     new = requests.post(f"{AUTH}/token", timeout=30, data={
         "grant_type": "refresh_token", "client_id": client_id(),
         "refresh_token": tok["refresh_token"], "scope": SCOPES}).json()
     if "access_token" not in new:
-        raise AuthError(f"Anmeldung abgelaufen – bitte neu anmelden ({new.get('error')}).")
+        raise AuthError(_("Sign-in expired – please sign in again ({error}).").format(error=new.get('error')))
     new.setdefault("refresh_token", tok["refresh_token"])
     store_token(new)
     return new["access_token"]
 
 
-# ---------- Graph-API ----------
+# ---------- Graph API ----------
 
 def graph(method, path, **kw):
     url = path if path.startswith("http") else GRAPH + path
@@ -200,10 +202,10 @@ def delete_list(list_id):
     graph("DELETE", f"/me/todo/lists/{list_id}")
 
 
-# ---------- Datum/Zeit ----------
+# ---------- Date/time ----------
 
 def parse_graph_dt(d):
-    """Graph-dateTimeTimeZone -> lokale, zeitzonenbewusste datetime."""
+    """Graph dateTimeTimeZone -> local, timezone-aware datetime."""
     if not d:
         return None
     dt = datetime.fromisoformat(d["dateTime"][:19])
@@ -238,13 +240,10 @@ def due_status(due_iso, today=None):
     return "later"
 
 
-WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
-
-
 def date_label(d, today=None):
-    """date -> 'Heute', 'Morgen' oder 'Fr 31.10.' (unabhängig von der Systemsprache)."""
+    """date -> 'Today', 'Tomorrow' or a full date such as 'Fri 31 Oct 2026'."""
     delta = (d - (today or date.today())).days
-    return {0: "Heute", 1: "Morgen"}.get(delta, f"{WEEKDAYS[d.weekday()]} {d:%d.%m.%Y}")
+    return {0: _("Today"), 1: _("Tomorrow")}.get(delta) or format_day(d)
 
 
 def due_label(due_iso, today=None):
@@ -253,22 +252,22 @@ def due_label(due_iso, today=None):
     today = today or date.today()
     due = date.fromisoformat(due_iso)
     delta = (due - today).days
-    text = f"{WEEKDAYS[due.weekday()]} {due:%d.%m.}" + (f"{due:%Y}" if due.year != today.year else "")
-    prefix = "Überfällig" if delta < 0 else {0: "Heute", 1: "Morgen"}.get(delta)
+    text = format_day(due, year=due.year != today.year)
+    prefix = _("Overdue") if delta < 0 else {0: _("Today"), 1: _("Tomorrow")}.get(delta)
     return f"{prefix} · {text}" if prefix else text
 
 
-# ---------- Wiederholung ----------
+# ---------- Recurrence ----------
 
 DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
 REPEAT_KINDS = ["none", "daily", "workdays", "weekly", "monthly", "yearly"]
-REPEAT_LABELS = ["Nie", "Täglich", "Wochentags (Mo–Fr)", "Wöchentlich", "Monatlich", "Jährlich"]
-REPEAT_UNITS = {"daily": ("Tag", "Tage"), "weekly": ("Woche", "Wochen"),
-          "monthly": ("Monat", "Monate"), "yearly": ("Jahr", "Jahre")}
+REPEAT_LABELS = [_(x) for x in ("Never", "Daily", "Weekdays (Mon–Fri)", "Weekly", "Monthly", "Yearly")]
+REPEAT_UNITS = {"daily": (_("day"), _("days")), "weekly": (_("week"), _("weeks")),
+                "monthly": (_("month"), _("months")), "yearly": (_("year"), _("years"))}
 
 
 def recurrence_from_graph(rec):
-    """Graph-patternedRecurrence -> {'kind', 'interval', 'days'} (days: 0=Mo .. 6=So)."""
+    """Graph patternedRecurrence -> {'kind', 'interval', 'days'} (days: 0=Mon .. 6=Sun)."""
     if not rec:
         return None
     pat = rec.get("pattern") or {}
@@ -303,51 +302,12 @@ def recurrence_label(rec):
         return ""
     kind, n = rec["kind"], rec["interval"]
     if kind == "workdays":
-        return "Mo–Fr"
-    base = {"daily": "täglich", "weekly": "wöchentlich", "monthly": "monatlich",
-            "yearly": "jährlich"}[kind] if n == 1 else f"alle {n} {REPEAT_UNITS[kind][1]}"
+        return _("Mon–Fri")
+    base = (_(kind) if n == 1
+            else _("every {n} {unit}").format(n=n, unit=REPEAT_UNITS[kind][1]))
     if kind == "weekly" and rec["days"]:
         base += " " + ", ".join(WEEKDAYS[d] for d in rec["days"])
     return base
-
-
-_WORDS = {"heute": 0, "morgen": 1, "übermorgen": 2}
-
-
-def parse_date(text, today=None):
-    """'heute', 'morgen', '31.10.', '31.10.2026', '2026-10-31' -> date | None."""
-    s = text.strip().lower()
-    if not s:
-        return None
-    today = today or date.today()
-    if s in _WORDS:
-        return today + timedelta(days=_WORDS[s])
-    if m := re.fullmatch(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})?", s):
-        day, month, year = int(m[1]), int(m[2]), m[3]
-        y = int(year) if year else today.year
-        y += 2000 if y < 100 else 0
-        d = date(y, month, day)
-        return d.replace(year=y + 1) if not year and d < today else d
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
-        return date.fromisoformat(s)
-    raise ValueError(f"Datum nicht erkannt: {text}")
-
-
-def parse_datetime(text, today=None):
-    """Datum + Uhrzeit, z.B. 'morgen 9:00', '31.10. 18:30', '14 uhr' -> datetime | None."""
-    s = text.strip().lower()
-    if not s:
-        return None
-    m = (re.fullmatch(r"(.*?)\s*(\d{1,2}):(\d{2})(?:\s*uhr)?", s)
-         or re.fullmatch(r"(.*?)\s*(\d{1,2})\s*uhr", s))
-    if not m:
-        raise ValueError(f"Uhrzeit fehlt (z.B. 'morgen 9:00'): {text}")
-    hour, minute = int(m[2]), int(m[3]) if m.lastindex >= 3 else 0
-    day = parse_date(m[1], today) if m[1] else (today or date.today())
-    dt = datetime(day.year, day.month, day.day, hour, minute).astimezone()
-    if not m[1] and dt < datetime.now().astimezone():
-        dt += timedelta(days=1)
-    return dt
 
 
 # ---------- Sync ----------
@@ -428,7 +388,7 @@ def main():
     except AuthError as e:
         sys.exit(str(e))
     except requests.RequestException as e:
-        sys.exit(f"Verbindung zu Microsoft fehlgeschlagen: {e}")
+        sys.exit(_("Connection to Microsoft failed: {error}").format(error=e))
 
 
 if __name__ == "__main__":
