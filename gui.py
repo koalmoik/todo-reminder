@@ -1,7 +1,10 @@
 """GTK 4/libadwaita window for viewing and editing Microsoft To Do tasks."""
+import colorsys
+import math
 import threading
 from datetime import date, datetime, timedelta
 
+import cairo
 import gi
 import requests
 
@@ -20,9 +23,25 @@ RANK = {"overdue": 0, "today": 1, "soon": 2, "later": 3, "none": 4}
 CSS = "".join(
     [".task-bar { min-width: 5px; border-radius: 3px; margin: 8px 0; }",
      ".dot { min-width: 10px; min-height: 10px; border-radius: 5px; }",
+     ".swatch { min-width: 26px; min-height: 26px; padding: 0; border-radius: 13px; }",
+     ".swatch:hover { filter: brightness(1.15); }",
      ".star { color: #f6d32d; font-size: 1.2em; }"]
     + [f".st-{k} {{ background: {v}; }}" for k, v in todo.STATUS_COLORS.items()]
-    + [f".lc-{i} {{ background: {c}; }}" for i, c in enumerate(todo.LIST_COLORS)])
+    + [".swatch-preview { min-width: 34px; min-height: 34px; border-radius: 17px; }"])
+
+_color_css = Gtk.CssProvider()
+_color_classes = {}
+
+
+def color_class(value):
+    """CSS class with the given list color as background (created on first use)."""
+    hexval = todo.color_hex(value)
+    cls = "lc-" + hexval[1:]
+    if cls not in _color_classes:
+        _color_classes[cls] = hexval
+        _color_css.load_from_string("".join(f".{c} {{ background: {h}; }}"
+                                            for c, h in _color_classes.items()))
+    return cls
 
 
 def esc(text):
@@ -31,6 +50,115 @@ def esc(text):
 
 def dot(css):
     return Gtk.Box(css_classes=["dot", css], valign=Gtk.Align.CENTER)
+
+
+def hex_to_rgb(hexval):
+    return tuple(int(hexval[i:i + 2], 16) / 255 for i in (1, 3, 5))
+
+
+def rgb_to_hex(r, g, b):
+    return "#{:02x}{:02x}{:02x}".format(*(round(x * 255) for x in (r, g, b)))
+
+
+def rounded_rect(cr, w, h, r):
+    cr.new_sub_path()
+    cr.arc(w - r, r, r, -math.pi / 2, 0)
+    cr.arc(w - r, h - r, r, 0, math.pi / 2)
+    cr.arc(r, h - r, r, math.pi / 2, math.pi)
+    cr.arc(r, r, r, math.pi, 3 * math.pi / 2)
+    cr.close_path()
+
+
+class ColorMixer(Gtk.Box):
+    """Saturation/value plane plus a hue strip; calls on_change('#rrggbb') while dragging."""
+
+    def __init__(self, hexval, on_change):
+        super().__init__(spacing=10)
+        self.on_change = on_change
+        self.h = self.s = self.v = 0.0
+        self.set_hex(hexval)
+        self.plane = Gtk.DrawingArea(hexpand=True, content_height=130, cursor=Gdk.Cursor.new_from_name("crosshair"))
+        self.plane.set_draw_func(self.draw_plane)
+        self.strip = Gtk.DrawingArea(content_width=18, content_height=130)
+        self.strip.set_draw_func(self.draw_strip)
+        self.append(self.plane)
+        self.append(self.strip)
+        for area, handler in ((self.plane, self.pick_plane), (self.strip, self.pick_strip)):
+            drag = Gtk.GestureDrag(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+            drag.connect("drag-begin", lambda g, x, y, a=area, f=handler: self._start(g, a, f, x, y))
+            drag.connect("drag-update", lambda g, dx, dy, a=area, f=handler: self._move(g, a, f, dx, dy))
+            area.add_controller(drag)
+
+    def set_hex(self, hexval):
+        h, s, v = colorsys.rgb_to_hsv(*hex_to_rgb(hexval))
+        if s > 0 and v > 0:  # grey/black carries no hue: keep the current one
+            self.h = h
+        if v > 0:
+            self.s = s
+        self.v = v
+        if hasattr(self, "plane"):
+            self.plane.queue_draw()
+            self.strip.queue_draw()
+
+    def hex(self):
+        return rgb_to_hex(*colorsys.hsv_to_rgb(self.h, self.s, self.v))
+
+    def _start(self, gesture, area, handler, x, y):
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)  # don't let the window move instead
+        gesture.origin = (x, y)
+        handler(area, x, y)
+
+    def _move(self, gesture, area, handler, dx, dy):
+        handler(area, gesture.origin[0] + dx, gesture.origin[1] + dy)
+
+    def pick_plane(self, area, x, y):
+        self.s = min(max(x / max(area.get_width(), 1), 0), 1)
+        self.v = 1 - min(max(y / max(area.get_height(), 1), 0), 1)
+        self.plane.queue_draw()
+        self.on_change(self.hex())
+
+    def pick_strip(self, area, x, y):
+        self.h = min(max(y / max(area.get_height(), 1), 0), 0.9999)
+        self.plane.queue_draw()
+        self.strip.queue_draw()
+        self.on_change(self.hex())
+
+    def draw_plane(self, _area, cr, w, h):
+        rounded_rect(cr, w, h, 8)
+        cr.clip()
+        cr.set_source_rgb(*colorsys.hsv_to_rgb(self.h, 1, 1))
+        cr.paint()
+        white = cairo.LinearGradient(0, 0, w, 0)
+        white.add_color_stop_rgba(0, 1, 1, 1, 1)
+        white.add_color_stop_rgba(1, 1, 1, 1, 0)
+        cr.set_source(white)
+        cr.paint()
+        black = cairo.LinearGradient(0, 0, 0, h)
+        black.add_color_stop_rgba(0, 0, 0, 0, 0)
+        black.add_color_stop_rgba(1, 0, 0, 0, 1)
+        cr.set_source(black)
+        cr.paint()
+        cr.reset_clip()
+        self._marker(cr, min(max(self.s * w, 7), w - 7), min(max((1 - self.v) * h, 7), h - 7))
+
+    def draw_strip(self, _area, cr, w, h):
+        rounded_rect(cr, w, h, w / 2)
+        grad = cairo.LinearGradient(0, 0, 0, h)
+        for i in range(7):
+            grad.add_color_stop_rgb(i / 6, *colorsys.hsv_to_rgb(i / 6 % 1, 1, 1))
+        cr.set_source(grad)
+        cr.fill()
+        self._marker(cr, w / 2, min(max(self.h * h, w / 2), h - w / 2))
+
+    @staticmethod
+    def _marker(cr, x, y):
+        cr.arc(x, y, 7, 0, 2 * math.pi)
+        cr.set_source_rgba(0, 0, 0, 0.5)
+        cr.set_line_width(4)
+        cr.stroke_preserve()
+        cr.set_source_rgb(1, 1, 1)
+        cr.set_line_width(2)
+        cr.stroke()
 
 
 def ask_name(parent, heading, initial, confirm, callback):
@@ -59,7 +187,8 @@ class Window(Adw.ApplicationWindow):
         self.current = ALL
         self._rendering = False
 
-        for name, handler in (("rename-list", self.on_rename_list), ("delete-list", self.on_delete_list)):
+        for name, handler in (("rename-list", self.on_rename_list), ("color-list", self.on_color_list),
+                              ("delete-list", self.on_delete_list)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", handler)
             self.add_action(action)
@@ -70,6 +199,7 @@ class Window(Adw.ApplicationWindow):
         header.pack_start(add)
         menu = Gio.Menu()
         menu.append(_("Rename list…"), "win.rename-list")
+        menu.append(_("Change color…"), "win.color-list")
         menu.append(_("Delete list…"), "win.delete-list")
         header.pack_end(Gtk.MenuButton(icon_name="view-more-symbolic", menu_model=menu,
                                        tooltip_text=_("List")))
@@ -205,7 +335,7 @@ class Window(Adw.ApplicationWindow):
             counts[t["list_id"]] = counts.get(t["list_id"], 0) + 1
         entries = [(ALL, _("All open"), "st-today", len(self.data["tasks"]))]
         entries += [(l["id"], l["name"] + (" 👥" if l.get("shared") else ""),
-                     f"lc-{l['color']}", counts.get(l["id"], 0)) for l in self.data["lists"]]
+                     color_class(l["color"]), counts.get(l["id"], 0)) for l in self.data["lists"]]
         for list_id, name, css, count in entries:
             box = Gtk.Box(spacing=10, margin_top=4, margin_bottom=4)
             box.append(dot(css))
@@ -222,6 +352,7 @@ class Window(Adw.ApplicationWindow):
         editable = bool(lst and not lst.get("default"))
         self.lookup_action("rename-list").set_enabled(editable)
         self.lookup_action("delete-list").set_enabled(editable)
+        self.lookup_action("color-list").set_enabled(lst is not None)
 
         self.tasks.remove_all()
         tasks = self.visible_tasks()
@@ -252,7 +383,7 @@ class Window(Adw.ApplicationWindow):
             row.add_suffix(Gtk.Label(label="★", css_classes=["star"]))
         if self.current == ALL:
             color = next((l["color"] for l in self.data["lists"] if l["id"] == t["list_id"]), 0)
-            row.add_suffix(dot(f"lc-{color}"))
+            row.add_suffix(dot(color_class(color)))
         row.add_suffix(Gtk.Image(icon_name="go-next-symbolic", css_classes=["dim-label"]))
         row.connect("activated", lambda *_: self.edit(t))
         return row
@@ -280,6 +411,70 @@ class Window(Adw.ApplicationWindow):
         lst = self.current_list()
         ask_name(self, _("Rename list"), lst["name"], _("Rename"),
                  lambda name: self.change(lambda: todo.rename_list(lst["id"], name), _("Renamed ✓")))
+
+    def on_color_list(self, *_args):
+        lst = self.current_list()
+        current = todo.color_hex(lst["color"])
+        dialog = Adw.AlertDialog(heading=_("Color for “{name}”").format(name=lst["name"]),
+                                 body=_("Pick a preset or mix your own color."),
+                                 default_response="ok", close_response="cancel")
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("ok", _("Apply"))
+        dialog.set_response_appearance("ok", Adw.ResponseAppearance.SUGGESTED)
+
+        presets = Gtk.Grid(halign=Gtk.Align.CENTER, column_spacing=8)
+        preview = Gtk.Box(css_classes=["swatch-preview", color_class(current)],
+                          valign=Gtk.Align.CENTER)
+        entry = Gtk.Entry(text=current, max_length=7, width_chars=9, activates_default=True,
+                          valign=Gtk.Align.CENTER, tooltip_text=_("Hex code, e.g. #3584e4"))
+        state = {"color": current, "syncing": False}
+
+        def show(hexval, source=None):
+            state["color"] = hexval
+            dialog.set_response_enabled("ok", hexval is not None)
+            if hexval is None:
+                entry.add_css_class("error")
+                return
+            entry.remove_css_class("error")
+            for c in list(preview.get_css_classes()):
+                if c.startswith("lc-"):
+                    preview.remove_css_class(c)
+            preview.add_css_class(color_class(hexval))
+            state["syncing"] = True
+            if source is not entry and entry.get_text().lower() != hexval:
+                entry.set_text(hexval)
+            if source is not mixer:
+                mixer.set_hex(hexval)
+            state["syncing"] = False
+
+        mixer = ColorMixer(current, lambda h: show(h, mixer))
+        mixer.set_margin_top(12)
+        entry.connect("changed", lambda e: state["syncing"] or show(todo.normalize_hex(e.get_text()), entry))
+
+        for i, hexval in enumerate(todo.LIST_COLORS):
+            btn = Gtk.Button(css_classes=["swatch", color_class(hexval)], tooltip_text=hexval,
+                             valign=Gtk.Align.CENTER)
+            btn.connect("clicked", lambda _b, h=hexval: show(h))
+            presets.attach(btn, i, 0, 1, 1)
+
+        custom = Gtk.Box(spacing=10, halign=Gtk.Align.CENTER, margin_top=12)
+        custom.append(preview)
+        custom.append(entry)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(presets)
+        box.append(mixer)
+        box.append(custom)
+        dialog.set_extra_child(box)
+        dialog.connect("response", lambda _d, r: r == "ok" and state["color"]
+                       and self.set_list_color(lst, state["color"]))
+        dialog.present(self)
+
+    def set_list_color(self, lst, color):
+        todo.set_list_color(lst["id"], color)
+        for l in self.data["lists"]:
+            if l["id"] == lst["id"]:
+                l["color"] = todo.color_hex(color)
+        self.render()
 
     def on_delete_list(self, *_args):
         lst = self.current_list()
@@ -559,6 +754,8 @@ def main(startup=False, new=False):
         provider.load_from_string(CSS)
         Gtk.StyleContext.add_provider_for_display(
             Gdk.Display.get_default(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), _color_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
         new_action = Gio.SimpleAction.new("new-task", None)
         new_action.connect("activate", lambda *_: (window().present(), window().edit(None)))
         app.add_action(new_action)

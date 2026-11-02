@@ -312,8 +312,41 @@ def recurrence_label(rec):
 
 # ---------- Sync ----------
 
+def normalize_hex(text):
+    """'#abc', 'abc', '#aabbcc' or 'aabbcc' -> '#aabbcc'; anything else -> None."""
+    m = re.fullmatch(r"#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})", (text or "").strip())
+    if not m:
+        return None
+    h = m.group(1).lower()
+    return "#" + (h if len(h) == 6 else "".join(c * 2 for c in h))
+
+
+def color_hex(value):
+    """List color as '#rrggbb'; also accepts the older index into LIST_COLORS."""
+    if isinstance(value, int):
+        return LIST_COLORS[value % len(LIST_COLORS)]
+    return normalize_hex(value) or LIST_COLORS[0]
+
+
 def list_color(list_id):
-    return zlib.crc32(list_id.encode()) % len(LIST_COLORS)
+    """The user's local choice from config.json, else a color derived from the ID."""
+    chosen = load_json(CONFIG_FILE, {}).get("list_colors", {}).get(list_id)
+    if chosen is not None:
+        return color_hex(chosen)
+    return LIST_COLORS[zlib.crc32(list_id.encode()) % len(LIST_COLORS)]
+
+
+def set_list_color(list_id, color):
+    color = color_hex(color)
+    config = load_json(CONFIG_FILE, {})
+    config.setdefault("list_colors", {})[list_id] = color
+    save_json(CONFIG_FILE, config)
+    cache = load_json(CACHE_FILE, None)
+    if cache:
+        for lst in cache.get("lists", []):
+            if lst["id"] == list_id:
+                lst["color"] = color
+        save_json(CACHE_FILE, cache)
 
 
 def _notes(task):
