@@ -271,17 +271,17 @@ class Window(Adw.ApplicationWindow):
 
     # ---------- Lists ----------
 
-    def on_new_list(self, *_):
+    def on_new_list(self, *_args):
         ask_name(self, _("New list"), "", _("Create"),
                  lambda name: self.change(lambda: todo.create_list(name),
                                           _("List “{name}” created").format(name=name)))
 
-    def on_rename_list(self, *_):
+    def on_rename_list(self, *_args):
         lst = self.current_list()
         ask_name(self, _("Rename list"), lst["name"], _("Rename"),
                  lambda name: self.change(lambda: todo.rename_list(lst["id"], name), _("Renamed ✓")))
 
-    def on_delete_list(self, *_):
+    def on_delete_list(self, *_args):
         lst = self.current_list()
         count = sum(t["list_id"] == lst["id"] for t in self.data["tasks"])
         dialog = Adw.AlertDialog(
@@ -333,7 +333,7 @@ class DatePicker(Gtk.MenuButton):
         self.set_popover(popover)
         self._update()
 
-    def _sync_calendar(self, *_):
+    def _sync_calendar(self, *_args):
         d = self.value or date.today()
         self._syncing = True
         self.cal.select_day(GLib.DateTime.new_local(d.year, d.month, d.day, 0, 0, 0))
@@ -480,7 +480,7 @@ class EditDialog(Adw.Dialog):
         days = tuple(i for i, b in enumerate(self.day_buttons) if b.get_active())
         return kind, self.interval.get_value_as_int(), days
 
-    def on_repeat_changed(self, *_):
+    def on_repeat_changed(self, *_args):
         kind = todo.REPEAT_KINDS[self.repeat.get_selected()]
         self.interval_row.set_visible(kind in todo.REPEAT_UNITS)
         self.days_row.set_visible(kind == "weekly")
@@ -507,7 +507,7 @@ class EditDialog(Adw.Dialog):
         return datetime(d.year, d.month, d.day,
                         self.hour.get_value_as_int(), self.minute.get_value_as_int()).astimezone()
 
-    def on_save(self, *_):
+    def on_save(self, *_args):
         title = self.title.get_text().strip()
         if not title:
             self.banner.set_title(_("Please enter a title."))
@@ -539,7 +539,7 @@ class EditDialog(Adw.Dialog):
         self.win.change(action, _("Saved ✓"))
         self.close()
 
-    def on_delete(self, *_):
+    def on_delete(self, *_args):
         t = self.t
         self.win.change(lambda: todo.delete_task(t["list_id"], t["id"]), _("“{title}” deleted").format(title=t["title"]))
         self.close()
