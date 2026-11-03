@@ -2,6 +2,6 @@
   "uuid": "todo-counter@peter",
   "name": "To Do Counter",
   "description": "Shows open Microsoft To Do tasks in the top bar.",
-  "shell-version": ["50"],
+  "shell-version": ["50", "51"],
   "version": 1
 }
